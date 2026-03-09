@@ -137,6 +137,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		for _, s := range m.services {
 			s.RefreshStatus()
+			s.RefreshProcs()
 		}
 		return m, tickCmd()
 	}
@@ -235,6 +236,25 @@ func (m model) renderLogs(width, height int) string {
 	}
 	title := titleStyle.Render(fmt.Sprintf(" %s ", logTitle))
 
+	// Process tree info
+	var procLine string
+	if len(m.services) > 0 {
+		procs := m.services[m.cursor].GetProcs()
+		if len(procs) > 0 {
+			var parts []string
+			for _, p := range procs {
+				entry := fmt.Sprintf("%d(%s)", p.PID, p.Comm)
+				if len(p.Ports) > 0 {
+					entry += " :" + strings.Join(p.Ports, ",:")
+				}
+				parts = append(parts, entry)
+			}
+			procLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+				"  procs: " + strings.Join(parts, "  "))
+			height-- // reserve a line for process info
+		}
+	}
+
 	var lines []string
 	if len(m.services) > 0 {
 		logs := m.services[m.cursor].GetLogs()
@@ -264,6 +284,10 @@ func (m model) renderLogs(width, height int) string {
 		lines = append(lines, "")
 	}
 
-	content := title + "\n" + strings.Join(lines[:height], "\n")
+	content := title + "\n"
+	if procLine != "" {
+		content += procLine + "\n"
+	}
+	content += strings.Join(lines[:height], "\n")
 	return borderStyle.Width(width).Render(content)
 }

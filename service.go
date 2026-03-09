@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ type Service struct {
 	Config     ServiceConfig
 	Status     string // "stopped", "running", "stopping"
 	Logs       []string
+	Procs      []ProcessInfo // cached process tree
 	baseDir    string
 	logMaxSize int64
 	mu         sync.Mutex
@@ -312,6 +314,109 @@ func (s *Service) truncateLogIfNeeded() {
 	}
 
 	os.WriteFile(s.logFile(), tail, 0644)
+}
+
+// ProcessInfo holds info about a process belonging to a service.
+type ProcessInfo struct {
+	PID   int
+	Comm  string
+	Ports []string
+}
+
+// GetProcs returns the cached process tree.
+func (s *Service) GetProcs() []ProcessInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]ProcessInfo, len(s.Procs))
+	copy(out, s.Procs)
+	return out
+}
+
+// RefreshProcs detects processes once when service starts running.
+func (s *Service) RefreshProcs() {
+	s.mu.Lock()
+	status := s.Status
+	hasProcs := len(s.Procs) > 0
+	s.mu.Unlock()
+
+	if status != "running" {
+		s.mu.Lock()
+		s.Procs = nil
+		s.mu.Unlock()
+		return
+	}
+	if hasProcs {
+		return
+	}
+
+	go func() {
+		procs := s.detectProcs()
+		s.mu.Lock()
+		s.Procs = procs
+		s.mu.Unlock()
+	}()
+}
+
+func (s *Service) detectProcs() []ProcessInfo {
+	// Find PIDs with log file open (catches detached children)
+	out, _ := exec.Command("lsof", "-t", s.logFile()).CombinedOutput()
+	selfPid := os.Getpid()
+	var pidArgs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if p, err := strconv.Atoi(line); err == nil && p != selfPid {
+			pidArgs = append(pidArgs, line)
+		}
+	}
+	if len(pidArgs) == 0 {
+		return nil
+	}
+	pidList := strings.Join(pidArgs, ",")
+
+	// Get command names
+	commMap := map[int]string{}
+	psOut, _ := exec.Command("ps", "-o", "pid,comm", "-p", pidList).Output()
+	for _, line := range strings.Split(string(psOut), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 {
+			if p, err := strconv.Atoi(f[0]); err == nil {
+				commMap[p] = filepath.Base(f[1])
+			}
+		}
+	}
+
+	// Build process list
+	procs := make([]ProcessInfo, len(pidArgs))
+	for i, s := range pidArgs {
+		p, _ := strconv.Atoi(s)
+		comm := commMap[p]
+		if comm == "" {
+			comm = "?"
+		}
+		procs[i] = ProcessInfo{PID: p, Comm: comm}
+	}
+
+	// Detect listening ports
+	portMap := map[int][]string{}
+	lsofOut, _ := exec.Command("lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pidList).CombinedOutput()
+	for _, line := range strings.Split(string(lsofOut), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 9 || f[0] == "COMMAND" {
+			continue
+		}
+		if pid, err := strconv.Atoi(f[1]); err == nil {
+			if idx := strings.LastIndex(f[8], ":"); idx >= 0 {
+				port := f[8][idx+1:]
+				if !slices.Contains(portMap[pid], port) {
+					portMap[pid] = append(portMap[pid], port)
+				}
+			}
+		}
+	}
+	for i := range procs {
+		procs[i].Ports = portMap[procs[i].PID]
+	}
+	return procs
 }
 
 func isProcessRunning(pid int) bool {
