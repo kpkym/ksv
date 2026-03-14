@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -41,11 +42,14 @@ var (
 type tickMsg time.Time
 
 type model struct {
-	services  []*Service
-	cursor    int
-	width     int
-	height    int
-	logScroll int
+	services       []*Service
+	cursor         int
+	width          int
+	height         int
+	logScroll      int
+	showHelp       bool
+	confirmAction  string // "a" or "s" when awaiting confirmation
+	confirmMessage string
 }
 
 func newModel(services []*Service) model {
@@ -73,6 +77,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tea.KeyMsg:
+		if m.showHelp {
+			m.showHelp = false
+			return m, nil
+		}
+
+		if m.confirmAction != "" {
+			if msg.String() == "y" || msg.String() == "Y" {
+				switch m.confirmAction {
+				case "a":
+					for _, s := range m.services {
+						go s.Start()
+					}
+				case "s":
+					for _, s := range m.services {
+						go s.Stop()
+					}
+				}
+			}
+			m.confirmAction = ""
+			m.confirmMessage = ""
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -105,14 +132,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// "stopping" → queued: opMu will serialize, Start runs after Stop completes
 
 		case "a":
-			for _, s := range m.services {
-				go s.Start()
-			}
+			m.confirmAction = "a"
+			m.confirmMessage = "Start all services?"
 
 		case "s":
-			for _, s := range m.services {
-				go s.Stop()
-			}
+			m.confirmAction = "s"
+			m.confirmMessage = "Stop all services?"
 
 		case "r":
 			s := m.services[m.cursor]
@@ -120,6 +145,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Stop()
 				s.Start()
 			}()
+
+		case "o":
+			if len(m.services) > 0 {
+				exec.Command("open", m.services[m.cursor].Config.Dir).Start()
+			}
 
 		case "G":
 			m.logScroll = 0
@@ -132,6 +162,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.logScroll = len(logs) - logAreaHeight
 				}
 			}
+
+		case "?":
+			m.showHelp = true
 		}
 
 	case tickMsg:
@@ -166,10 +199,63 @@ func (m model) View() string {
 	// Join panels
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	// Help bar
-	help := helpStyle.Render("  ↑↓/jk select  enter toggle  a start all  s stop all  r restart  q quit  Q quit+stop all")
+	hint := helpStyle.Render("  ? help")
 
-	return panels + "\n" + help
+	result := panels + "\n" + hint
+
+	if m.confirmAction != "" {
+		dialogStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("214")).
+			Padding(1, 2)
+
+		dialog := dialogStyle.Render(
+			m.confirmMessage + "\n\n" +
+				helpStyle.Render("y confirm / any other key cancel"))
+
+		result = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
+	}
+
+	if m.showHelp {
+		helpContent := []string{
+			"  ↑/k       Move up",
+			"  ↓/j       Move down",
+			"  enter     Toggle service",
+			"  a         Start all",
+			"  s         Stop all",
+			"  r         Restart selected",
+			"  o         Open dir in Finder",
+			"  g/G       Scroll logs top/bottom",
+			"  q         Quit",
+			"  Q         Quit + stop all",
+			"",
+			"  Press any key to close",
+		}
+
+		dialogStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("36")).
+			Padding(1, 2)
+
+		dialog := dialogStyle.Render(
+			titleStyle.Render(" Keybindings ") + "\n\n" + strings.Join(helpContent, "\n"))
+
+		// Center the dialog
+		dialogW := lipgloss.Width(dialog)
+		dialogH := lipgloss.Height(dialog)
+		x := (m.width - dialogW) / 2
+		y := (m.height - dialogH) / 2
+		if x < 0 {
+			x = 0
+		}
+		if y < 0 {
+			y = 0
+		}
+
+		result = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
+	}
+
+	return result
 }
 
 func (m model) renderServiceList(width, height int) string {
