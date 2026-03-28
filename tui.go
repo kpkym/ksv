@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -151,6 +152,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				exec.Command("open", m.services[m.cursor].Config.Dir).Start()
 			}
 
+		case "c":
+			exec.Command("open", filepath.Dir(findConfigPath())).Start()
+
 		case "G":
 			m.logScroll = 0
 
@@ -225,6 +229,7 @@ func (m model) View() string {
 			"  s         Stop all",
 			"  r         Restart selected",
 			"  o         Open dir in Finder",
+			"  c         Open config dir",
 			"  g/G       Scroll logs top/bottom",
 			"  q         Quit",
 			"  Q         Quit + stop all",
