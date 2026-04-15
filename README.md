@@ -52,7 +52,14 @@ cmd = go run .
 [worker]
 dir = /path/to/worker
 cmd = npm start
+
+[pinger]
+dir = /tmp
+cmd = sudo ping -i 0.5 127.0.0.1
+sudo = true
 ```
+
+When `sudo = true`, ksv prompts for the password the first time the service starts, validates it via `sudo -S -v`, and refreshes the sudo timestamp every 4 minutes so the service stays runnable without re-prompting. The password is held only in memory and cleared when ksv exits.
 
 ### Config file search order
 
@@ -67,6 +74,7 @@ cmd = npm start
 | `log_max_size` | Global | Max log file size (supports `K`, `M`, `G` suffixes, `0` for unlimited) | `10M` |
 | `dir` | Service | Working directory | required |
 | `cmd` | Service | Bash command to run | required |
+| `sudo` | Service | Prompt for sudo password and keep timestamp fresh while running | `false` |
 
 ## Keybindings
 

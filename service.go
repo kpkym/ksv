@@ -424,6 +424,27 @@ func isProcessRunning(pid int) bool {
 	return err == nil
 }
 
+// SudoTimestampValid returns true if sudo can run without prompting (cached timestamp).
+func SudoTimestampValid() bool {
+	return exec.Command("sudo", "-n", "-v").Run() == nil
+}
+
+// RefreshSudoTimestamp validates the password and refreshes sudo's timestamp,
+// so subsequent `sudo ...` invocations from child processes don't prompt.
+func RefreshSudoTimestamp(password string) error {
+	cmd := exec.Command("sudo", "-S", "-v")
+	cmd.Stdin = strings.NewReader(password + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
+
 func sleepMs(ms int) {
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 }

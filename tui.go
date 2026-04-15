@@ -51,6 +51,13 @@ type model struct {
 	showHelp       bool
 	confirmAction  string // "a" or "s" when awaiting confirmation
 	confirmMessage string
+
+	sudoPassword    string
+	sudoKeepalive   bool
+	passwordPrompt  bool
+	passwordInput   string
+	passwordError   string
+	pendingAction   func()
 }
 
 func newModel(services []*Service) model {
@@ -59,6 +66,108 @@ func newModel(services []*Service) model {
 		width:    80,
 		height:   24,
 	}
+}
+
+func sudoKeepalive(password string) {
+	for {
+		time.Sleep(4 * time.Minute)
+		if err := RefreshSudoTimestamp(password); err != nil {
+			return
+		}
+	}
+}
+
+func (m model) needsSudoAuth(needsSudo bool) bool {
+	if !needsSudo {
+		return false
+	}
+	if m.sudoPassword != "" {
+		return false
+	}
+	return !SudoTimestampValid()
+}
+
+func (m model) startService(s *Service) (tea.Model, tea.Cmd) {
+	pw := m.sudoPassword
+	start := func() {
+		go func() {
+			if s.Config.Sudo && pw != "" {
+				RefreshSudoTimestamp(pw)
+			}
+			s.Start()
+		}()
+	}
+	if m.needsSudoAuth(s.Config.Sudo) {
+		m.passwordPrompt = true
+		m.passwordInput = ""
+		m.passwordError = ""
+		m.pendingAction = func() { go s.Start() }
+		return m, nil
+	}
+	start()
+	return m, nil
+}
+
+func (m model) restartService(s *Service) (tea.Model, tea.Cmd) {
+	pw := m.sudoPassword
+	restart := func() {
+		go func() {
+			s.Stop()
+			if s.Config.Sudo && pw != "" {
+				RefreshSudoTimestamp(pw)
+			}
+			s.Start()
+		}()
+	}
+	if m.needsSudoAuth(s.Config.Sudo) {
+		m.passwordPrompt = true
+		m.passwordInput = ""
+		m.passwordError = ""
+		m.pendingAction = func() {
+			go func() {
+				s.Stop()
+				s.Start()
+			}()
+		}
+		return m, nil
+	}
+	restart()
+	return m, nil
+}
+
+func (m model) startAll() (tea.Model, tea.Cmd) {
+	anySudo := false
+	for _, s := range m.services {
+		if s.Config.Sudo && s.GetStatus() != "running" {
+			anySudo = true
+			break
+		}
+	}
+	pw := m.sudoPassword
+	services := m.services
+	startAll := func() {
+		go func() {
+			if anySudo && pw != "" {
+				RefreshSudoTimestamp(pw)
+			}
+			for _, s := range services {
+				go s.Start()
+			}
+		}()
+	}
+	if m.needsSudoAuth(anySudo) {
+		m.passwordPrompt = true
+		m.passwordInput = ""
+		m.passwordError = ""
+		m.pendingAction = func() {
+			for _, s := range services {
+				go s.Start()
+			}
+		}
+		return m, nil
+	}
+	startAll()
+	return m, nil
 }
 
 func tickCmd() tea.Cmd {
@@ -83,13 +192,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.passwordPrompt {
+			switch msg.String() {
+			case "esc", "ctrl+c":
+				m.passwordPrompt = false
+				m.passwordInput = ""
+				m.passwordError = ""
+				m.pendingAction = nil
+				return m, nil
+			case "enter":
+				pw := m.passwordInput
+				if err := RefreshSudoTimestamp(pw); err != nil {
+					m.passwordError = err.Error()
+					m.passwordInput = ""
+					return m, nil
+				}
+				m.sudoPassword = pw
+				if !m.sudoKeepalive {
+					m.sudoKeepalive = true
+					go sudoKeepalive(pw)
+				}
+				action := m.pendingAction
+				m.passwordPrompt = false
+				m.passwordInput = ""
+				m.passwordError = ""
+				m.pendingAction = nil
+				if action != nil {
+					action()
+				}
+				return m, nil
+			case "backspace":
+				if len(m.passwordInput) > 0 {
+					m.passwordInput = m.passwordInput[:len(m.passwordInput)-1]
+				}
+				return m, nil
+			default:
+				if len(msg.Runes) > 0 {
+					m.passwordInput += string(msg.Runes)
+				}
+				return m, nil
+			}
+		}
+
 		if m.confirmAction != "" {
 			if msg.String() == "y" || msg.String() == "Y" {
 				switch m.confirmAction {
 				case "a":
-					for _, s := range m.services {
-						go s.Start()
-					}
+					m.confirmAction = ""
+					m.confirmMessage = ""
+					return m.startAll()
 				case "s":
 					for _, s := range m.services {
 						go s.Stop()
@@ -128,7 +279,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if status == "running" {
 				go s.Stop()
 			} else if status == "stopped" {
-				go s.Start()
+				return m.startService(s)
 			}
 			// "stopping" → queued: opMu will serialize, Start runs after Stop completes
 
@@ -142,10 +293,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			s := m.services[m.cursor]
-			go func() {
-				s.Stop()
-				s.Start()
-			}()
+			return m.restartService(s)
 
 		case "o":
 			if len(m.services) > 0 {
@@ -217,6 +365,31 @@ func (m model) View() string {
 			m.confirmMessage + "\n\n" +
 				helpStyle.Render("y confirm / any other key cancel"))
 
+		result = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
+	}
+
+	if m.passwordPrompt {
+		masked := strings.Repeat("•", len(m.passwordInput))
+		inputBox := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("236")).
+			Width(36).
+			Padding(0, 1).
+			Render(masked + "_")
+
+		body := "Sudo password:\n\n" + inputBox
+		if m.passwordError != "" {
+			body += "\n\n" + lipgloss.NewStyle().
+				Foreground(lipgloss.Color("196")).
+				Render(m.passwordError)
+		}
+		body += "\n\n" + helpStyle.Render("enter submit / esc cancel")
+
+		dialogStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("214")).
+			Padding(1, 2)
+		dialog := dialogStyle.Render(body)
 		result = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
 	}
 

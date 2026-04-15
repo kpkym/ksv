@@ -21,6 +21,7 @@ type ServiceConfig struct {
 	Name string
 	Dir  string
 	Cmd  string
+	Sudo bool
 }
 
 var sectionRe = regexp.MustCompile(`^\[(.+)\]$`)
@@ -86,6 +87,9 @@ func loadConfig(path string) (*Config, error) {
 			current.Dir = val
 		case "cmd":
 			current.Cmd = val
+		case "sudo":
+			v := strings.ToLower(val)
+			current.Sudo = v == "true" || v == "1" || v == "yes" || v == "on"
 		}
 	}
 
