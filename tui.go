@@ -265,13 +265,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
-				m.logScroll = 0
+			} else {
+				m.cursor = len(m.services) - 1
 			}
+			m.logScroll = 0
 		case "down", "j":
 			if m.cursor < len(m.services)-1 {
 				m.cursor++
-				m.logScroll = 0
+			} else {
+				m.cursor = 0
 			}
+			m.logScroll = 0
 
 		case "enter":
 			s := m.services[m.cursor]
