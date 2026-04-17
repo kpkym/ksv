@@ -1,7 +1,4 @@
-.PHONY: install build
-
-install:
-	go install .
+.PHONY: build
 
 build:
 	go build -o dist/ksv .
